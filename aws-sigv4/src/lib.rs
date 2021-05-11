@@ -373,13 +373,7 @@ mod tests {
 
         let actual = format!("{}", creq);
         let expected = read!(creq: "double-url-encode")?;
-        println!("{}", actual);
         assert_eq!(actual, expected);
-        /*let req = read!(req: "double-url-encode")?;
-        let req = parse_request(req.as_bytes())?;
-        let expected_creq = read!(creq: "double-url-encode")?;
-        let actual_creq = CanonicalRequest::from(&req);
-        let expected_creq =*/
         Ok(())
     }
 
