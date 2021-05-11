@@ -28,8 +28,8 @@ impl CanonicalRequest {
         req: &Request<B>,
         settings: &SigningSettings,
     ) -> Result<CanonicalRequest, Error>
-        where
-            B: AsRef<[u8]>,
+    where
+        B: AsRef<[u8]>,
     {
         let path = if settings.double_uri_encode {
             double_encode(req.uri().path())
@@ -178,8 +178,8 @@ impl<'a> TryFrom<&'a str> for Scope<'a> {
     fn try_from(s: &'a str) -> Result<Scope<'a>, Self::Error> {
         let mut scopes = s.split('/');
         let date = Date::<Utc>::parse_aws(scopes.next().expect("missing date"))?;
-        let region = scopes.next().expect("missing date");
-        let service = scopes.next().expect("missing date");
+        let region = scopes.next().expect("missing region");
+        let service = scopes.next().expect("missing service");
 
         let scope = Scope {
             date,
