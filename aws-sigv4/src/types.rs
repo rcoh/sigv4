@@ -3,7 +3,7 @@ use crate::{
     SigningSettings, UriEncoding, DATE_FORMAT, HMAC_256,
 };
 use chrono::{format::ParseError, Date, DateTime, NaiveDate, NaiveDateTime, Utc};
-use http::{header::HeaderName, HeaderMap, Method, Request};
+use http::{HeaderMap, Method, Request, header::{HeaderName, USER_AGENT}};
 use serde_urlencoded as qs;
 use std::{
     cmp::Ordering,
@@ -31,32 +31,6 @@ pub(crate) struct AddedHeaders {
     pub x_amz_content_256: Option<String>,
     pub x_amz_security_token: Option<String>,
 }
-
-/*
-pub (crate) fn add_signed_headers(headers: &mut HeaderMap, body: SignableBody, config: &Config) -> AddedHeaders {
-        let x_amz_date = HeaderName::from_static("x-amz-date");
-        let date = DateTime::<Utc>::from(config.date);
-        let date_header = HeaderValue::try_from(date.fmt_aws()).expect("date is valid header value");
-        headers.insert(
-            x_amz_date,
-            date_header.clone(),
-        );
-
-        let mut x_amz_content_256 = None;
-
-        if config.settings.signed_body_header == SignedBodyHeaderType::XAmzSha256 {
-            let digest = sha256_digest(body);
-            let content_header =
-
-        }
-
-
-        AddedHeaders {
-            x_amz_date: date_header,
-            x_amz_content_256: None,
-            x_amz_security_token: None,
-        }
-}*/
 
 impl CanonicalRequest {
     pub(crate) fn from<B>(
@@ -118,7 +92,10 @@ impl CanonicalRequest {
 
         let mut signed_headers = BTreeSet::new();
         for (name, _) in canonical_headers.iter() {
-            signed_headers.insert(CanonicalHeaderName(name.clone()));
+            // The user agent header should not be signed
+            if name != USER_AGENT {
+                signed_headers.insert(CanonicalHeaderName(name.clone()));
+            }
         }
         creq.signed_headers = SignedHeaders {
             inner: signed_headers,
