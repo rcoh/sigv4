@@ -1,8 +1,6 @@
 use crate::{
-    header::HeaderValue,
-    sign::{encode_bytes_with_hex, sha256_digest},
-    Config, Error, SignableBody, SignedBodyHeaderType, SigningSettings, UriEncoding, DATE_FORMAT,
-    HMAC_256,
+    header::HeaderValue, sign::encode_bytes_with_hex, Error, SignableBody, SignedBodyHeaderType,
+    SigningSettings, UriEncoding, DATE_FORMAT, HMAC_256,
 };
 use chrono::{format::ParseError, Date, DateTime, NaiveDate, NaiveDateTime, Utc};
 use http::{header::HeaderName, HeaderMap, Method, Request};
@@ -10,7 +8,7 @@ use serde_urlencoded as qs;
 use std::{
     cmp::Ordering,
     collections::{BTreeMap, BTreeSet},
-    convert::{AsRef, TryFrom},
+    convert::TryFrom,
     fmt,
 };
 
@@ -91,14 +89,11 @@ impl CanonicalRequest {
         let x_amz_date = HeaderName::from_static("x-amz-date");
         let date_str = date.fmt_aws();
         let date_header = HeaderValue::from_str(&date_str).expect("date is valid header value");
-        canonical_headers.insert(
-            x_amz_date,
-            date_header
-        );
+        canonical_headers.insert(x_amz_date, date_header);
         let mut out = AddedHeaders {
             x_amz_date: date_str,
             x_amz_content_256: None,
-            x_amz_security_token: None
+            x_amz_security_token: None,
         };
 
         if let Some(security_token) = security_token {
@@ -108,7 +103,7 @@ impl CanonicalRequest {
             );
             out.x_amz_security_token = Some(security_token.to_string());
         }
-        
+
         let payload_hash = match body {
             SignableBody::Bytes(data) => encode_bytes_with_hex(data),
             SignableBody::Precomputed(digest) => digest.clone(),

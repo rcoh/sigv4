@@ -61,7 +61,7 @@ pub enum SignatureKey {
     Authorization,
     AmzDate,
     AmzSecurityToken,
-    AmzContent256
+    AmzContent256,
 }
 
 impl SignatureKey {
@@ -70,7 +70,7 @@ impl SignatureKey {
             SignatureKey::Authorization => header::AUTHORIZATION,
             SignatureKey::AmzDate => HeaderName::from_static(X_AMZ_DATE),
             SignatureKey::AmzSecurityToken => HeaderName::from_static(X_AMZ_SECURITY_TOKEN),
-            SignatureKey::AmzContent256 => HeaderName::from_static("x-amz-content-sha256")
+            SignatureKey::AmzContent256 => HeaderName::from_static("x-amz-content-sha256"),
         }
     }
 }
@@ -147,7 +147,8 @@ pub fn sign_core<'a, B>(
         settings,
     } = config;
     let date = DateTime::<Utc>::from(*date);
-    let (creq, mut extra_headers) = CanonicalRequest::from(req, body, settings, date, *security_token).unwrap();
+    let (creq, extra_headers) =
+        CanonicalRequest::from(req, body, settings, date, *security_token).unwrap();
 
     // Step 2: https://docs.aws.amazon.com/en_pv/general/latest/gr/sigv4-create-string-to-sign.html.
     let encoded_creq = &encode_with_hex(creq.fmt());
@@ -161,12 +162,17 @@ pub fn sign_core<'a, B>(
     let authorization = build_authorization_header(access_key, &creq, sts, &signature);
 
     let date = extra_headers.x_amz_date;
-    let mut security_token = extra_headers.x_amz_security_token.map(|tok|(SignatureKey::AmzSecurityToken, tok));
-    let mut content = extra_headers.x_amz_content_256.map(|content|(SignatureKey::AmzContent256, content));
+    let mut security_token = extra_headers
+        .x_amz_security_token
+        .map(|tok| (SignatureKey::AmzSecurityToken, tok));
+    let mut content = extra_headers
+        .x_amz_content_256
+        .map(|content| (SignatureKey::AmzContent256, content));
     iter::once((SignatureKey::Authorization, authorization))
         .chain(iter::once((SignatureKey::AmzDate, date)))
         .chain(iter::from_fn(move || {
-            security_token.take().or_else(||content.take())       }))
+            security_token.take().or_else(|| content.take())
+        }))
 }
 
 #[derive(Debug, PartialEq, Serialize, Deserialize, Default, Clone)]
@@ -212,7 +218,7 @@ mod tests {
 
         // Step 1: https://docs.aws.amazon.com/en_pv/general/latest/gr/sigv4-create-canonical-request.html.
         let s = read!(req: "get-vanilla-query-order-key-case")?;
-        let mut req = parse_request(s.as_bytes())?;
+        let req = parse_request(s.as_bytes())?;
         let date = NaiveDateTime::parse_from_str("20150830T123600Z", DATE_FORMAT).unwrap();
         let date = DateTime::<Utc>::from_utc(date, Utc);
         let (creq, _) = CanonicalRequest::from(
@@ -258,7 +264,7 @@ mod tests {
     #[test]
     fn test_build_authorization_header() -> Result<(), Error> {
         let s = read!(req: "get-vanilla-query-order-key-case")?;
-        let mut req = parse_request(s.as_bytes())?;
+        let req = parse_request(s.as_bytes())?;
         let date = NaiveDateTime::parse_from_str("20150830T123600Z", DATE_FORMAT).unwrap();
         let date = DateTime::<Utc>::from_utc(date, Utc);
         let creq = CanonicalRequest::from(
@@ -267,7 +273,8 @@ mod tests {
             &SigningSettings::default(),
             date,
             None,
-        )?.0;
+        )?
+        .0;
 
         let encoded_creq = &encode_with_hex(creq.fmt());
         let sts = StringToSign::new(date, "us-east-1", "service", encoded_creq);
@@ -421,7 +428,8 @@ mod tests {
             &SigningSettings::default(),
             date,
             None,
-        )?.0;
+        )?
+        .0;
 
         let actual = format!("{}", creq);
         let expected = read!(creq: "double-url-encode")?;

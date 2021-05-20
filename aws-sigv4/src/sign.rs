@@ -1,7 +1,7 @@
 use crate::types::DateExt;
 use chrono::{Date, Utc};
 use ring::{
-    digest::{self, Context, Digest, SHA256},
+    digest::{self, Digest},
     hmac::{self, Key, Tag},
 };
 
