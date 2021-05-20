@@ -1,5 +1,8 @@
 use crate::{
-    sign::encode_bytes_with_hex, Error, SigningSettings, UriEncoding, DATE_FORMAT, HMAC_256,
+    header::HeaderValue,
+    sign::{encode_bytes_with_hex, sha256_digest},
+    Config, Error, SignableBody, SignedBodyHeaderType, SigningSettings, UriEncoding, DATE_FORMAT,
+    HMAC_256,
 };
 use chrono::{format::ParseError, Date, DateTime, NaiveDate, NaiveDateTime, Utc};
 use http::{header::HeaderName, HeaderMap, Method, Request};
@@ -25,14 +28,46 @@ pub(crate) struct CanonicalRequest {
     pub(crate) payload_hash: String,
 }
 
+pub(crate) struct AddedHeaders {
+    pub x_amz_date: String,
+    pub x_amz_content_256: Option<String>,
+    pub x_amz_security_token: Option<String>,
+}
+
+/*
+pub (crate) fn add_signed_headers(headers: &mut HeaderMap, body: SignableBody, config: &Config) -> AddedHeaders {
+        let x_amz_date = HeaderName::from_static("x-amz-date");
+        let date = DateTime::<Utc>::from(config.date);
+        let date_header = HeaderValue::try_from(date.fmt_aws()).expect("date is valid header value");
+        headers.insert(
+            x_amz_date,
+            date_header.clone(),
+        );
+
+        let mut x_amz_content_256 = None;
+
+        if config.settings.signed_body_header == SignedBodyHeaderType::XAmzSha256 {
+            let digest = sha256_digest(body);
+            let content_header =
+
+        }
+
+
+        AddedHeaders {
+            x_amz_date: date_header,
+            x_amz_content_256: None,
+            x_amz_security_token: None,
+        }
+}*/
+
 impl CanonicalRequest {
     pub(crate) fn from<B>(
         req: &Request<B>,
+        body: SignableBody,
         settings: &SigningSettings,
-    ) -> Result<CanonicalRequest, Error>
-    where
-        B: AsRef<[u8]>,
-    {
+        date: DateTime<Utc>,
+        security_token: Option<&str>,
+    ) -> Result<(CanonicalRequest, AddedHeaders), Error> {
         let path = req.uri().path();
         let path = match settings.uri_encoding {
             // The string is already URI encoded, we don't need to encode everything again, just `%`
@@ -50,16 +85,51 @@ impl CanonicalRequest {
             creq.params = qs::to_string(params)?;
         }
 
-        let mut headers = BTreeSet::new();
-        for (name, _) in req.headers() {
-            headers.insert(CanonicalHeaderName(name.clone()));
+        let mut canonical_headers = req.headers().clone();
+        canonical_headers.remove("x-amz-date");
+        canonical_headers.remove("x-amz-security-token");
+        let x_amz_date = HeaderName::from_static("x-amz-date");
+        let date_str = date.fmt_aws();
+        let date_header = HeaderValue::from_str(&date_str).expect("date is valid header value");
+        canonical_headers.insert(
+            x_amz_date,
+            date_header
+        );
+        let mut out = AddedHeaders {
+            x_amz_date: date_str,
+            x_amz_content_256: None,
+            x_amz_security_token: None
+        };
+
+        if let Some(security_token) = security_token {
+            canonical_headers.insert(
+                "x-amz-security-token",
+                HeaderValue::from_str(security_token)?,
+            );
+            out.x_amz_security_token = Some(security_token.to_string());
         }
-        creq.signed_headers = SignedHeaders { inner: headers };
-        creq.headers = req.headers().clone();
-        let body: &[u8] = req.body().as_ref();
-        let payload = encode_bytes_with_hex(body);
-        creq.payload_hash = payload;
-        Ok(creq)
+        
+        let payload_hash = match body {
+            SignableBody::Bytes(data) => encode_bytes_with_hex(data),
+            SignableBody::Precomputed(digest) => digest.clone(),
+            SignableBody::UnsignedPayload => "UNSIGNED-PAYLOAD".to_string(),
+        };
+        creq.payload_hash = payload_hash.clone();
+        if settings.signed_body_header == SignedBodyHeaderType::XAmzSha256 {
+            let as_header_value = HeaderValue::from_str(&creq.payload_hash)?;
+            canonical_headers.insert("x-amz-content-sha256", as_header_value.clone());
+            out.x_amz_content_256 = Some(creq.payload_hash.clone());
+        }
+
+        let mut signed_headers = BTreeSet::new();
+        for (name, _) in canonical_headers.iter() {
+            signed_headers.insert(CanonicalHeaderName(name.clone()));
+        }
+        creq.signed_headers = SignedHeaders {
+            inner: signed_headers,
+        };
+        creq.headers = canonical_headers;
+        Ok((creq, out))
     }
 }
 

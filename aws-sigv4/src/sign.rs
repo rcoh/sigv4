@@ -1,7 +1,7 @@
 use crate::types::DateExt;
 use chrono::{Date, Utc};
 use ring::{
-    digest::{self, Digest},
+    digest::{self, Context, Digest, SHA256},
     hmac::{self, Key, Tag},
 };
 
@@ -35,6 +35,10 @@ pub fn calculate_signature(signing_key: Tag, string_to_sign: &[u8]) -> String {
     let tag = hmac::sign(&s_key, string_to_sign);
 
     hex::encode(tag)
+}
+
+pub fn sha256_digest(data: &[u8]) -> String {
+    encode_bytes_with_hex(data)
 }
 
 // kSecret = your secret access key
