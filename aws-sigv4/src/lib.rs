@@ -147,7 +147,7 @@ pub fn sign_core<'a, B>(
     let mut content = extra_headers
         .x_amz_content_256
         .map(|content| (X_AMZ_CONTENT_SHA_256, content));
-    Ok(iter::once(("Authorization", authorization))
+    Ok(iter::once(("authorization", authorization))
         .chain(iter::once(date))
         .chain(iter::from_fn(move || {
             security_token.take().or_else(|| content.take())
