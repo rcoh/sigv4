@@ -1,5 +1,8 @@
 use chrono::{DateTime, Utc};
-use http::header;
+use http::{
+    header::{self, HeaderName},
+    HeaderValue,
+};
 use serde::{Deserialize, Serialize};
 use std::{iter, str};
 
@@ -8,6 +11,7 @@ pub const DATE_FORMAT: &str = "%Y%m%dT%H%M%SZ";
 pub const X_AMZ_SECURITY_TOKEN: &str = "x-amz-security-token";
 pub const X_AMZ_DATE: &str = "x-amz-date";
 pub const X_AMZ_TARGET: &str = "x-amz-target";
+pub const X_AMZ_CONTENT_SHA_256: &str = "x-amz-content-sha256";
 
 pub mod sign;
 pub mod types;
@@ -15,7 +19,6 @@ pub mod types;
 type Error = Box<dyn std::error::Error + Send + Sync + 'static>;
 
 use crate::UriEncoding::Double;
-use http::header::HeaderName;
 use sign::{calculate_signature, encode_with_hex, generate_signing_key};
 use std::time::SystemTime;
 use types::{AsSigV4, CanonicalRequest, StringToSign};
@@ -42,37 +45,12 @@ where
             date: SystemTime::now(),
             settings: Default::default(),
         },
-    ) {
+    )? {
         req.headers_mut()
-            .append(header_name.header_name(), header_value.parse()?);
+            .append(HeaderName::from_static(header_name), header_value);
     }
 
     Ok(())
-}
-
-/// SignatureKey is the key portion of the key-value pair of a generated SigV4 signature.
-///
-/// When signing with SigV4, the algorithm produces multiple components of a signature that MUST
-/// be applied to a request.
-
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
-#[non_exhaustive]
-pub enum SignatureKey {
-    Authorization,
-    AmzDate,
-    AmzSecurityToken,
-    AmzContent256,
-}
-
-impl SignatureKey {
-    pub fn header_name(&self) -> HeaderName {
-        match self {
-            SignatureKey::Authorization => header::AUTHORIZATION,
-            SignatureKey::AmzDate => HeaderName::from_static(X_AMZ_DATE),
-            SignatureKey::AmzSecurityToken => HeaderName::from_static(X_AMZ_SECURITY_TOKEN),
-            SignatureKey::AmzContent256 => HeaderName::from_static("x-amz-content-sha256"),
-        }
-    }
 }
 
 pub struct Config<'a> {
@@ -135,7 +113,7 @@ pub fn sign_core<'a, B>(
     req: &'a http::Request<B>,
     body: SignableBody,
     config: &'a Config<'a>,
-) -> impl Iterator<Item = (SignatureKey, String)> {
+) -> Result<impl Iterator<Item = (&'static str, HeaderValue)>, Error> {
     // Step 1: https://docs.aws.amazon.com/en_pv/general/latest/gr/sigv4-create-canonical-request.html.
     let Config {
         access_key,
@@ -147,8 +125,7 @@ pub fn sign_core<'a, B>(
         settings,
     } = config;
     let date = DateTime::<Utc>::from(*date);
-    let (creq, extra_headers) =
-        CanonicalRequest::from(req, body, settings, date, *security_token).unwrap();
+    let (creq, extra_headers) = CanonicalRequest::from(req, body, settings, date, *security_token)?;
 
     // Step 2: https://docs.aws.amazon.com/en_pv/general/latest/gr/sigv4-create-string-to-sign.html.
     let encoded_creq = &encode_with_hex(creq.fmt());
@@ -159,20 +136,22 @@ pub fn sign_core<'a, B>(
     let signature = calculate_signature(signing_key, &sts.fmt().as_bytes());
 
     // Step 4: https://docs.aws.amazon.com/en_pv/general/latest/gr/sigv4-add-signature-to-request.html
-    let authorization = build_authorization_header(access_key, &creq, sts, &signature);
+    let mut authorization: HeaderValue =
+        build_authorization_header(access_key, &creq, sts, &signature).parse()?;
+    authorization.set_sensitive(true);
 
-    let date = extra_headers.x_amz_date;
+    let date = (X_AMZ_DATE, extra_headers.x_amz_date);
     let mut security_token = extra_headers
         .x_amz_security_token
-        .map(|tok| (SignatureKey::AmzSecurityToken, tok));
+        .map(|tok| (X_AMZ_SECURITY_TOKEN, tok));
     let mut content = extra_headers
         .x_amz_content_256
-        .map(|content| (SignatureKey::AmzContent256, content));
-    iter::once((SignatureKey::Authorization, authorization))
-        .chain(iter::once((SignatureKey::AmzDate, date)))
+        .map(|content| (X_AMZ_CONTENT_SHA_256, content));
+    Ok(iter::once(("Authorization", authorization))
+        .chain(iter::once(date))
         .chain(iter::from_fn(move || {
             security_token.take().or_else(|| content.take())
-        }))
+        })))
 }
 
 #[derive(Debug, PartialEq, Serialize, Deserialize, Default, Clone)]
@@ -201,10 +180,10 @@ mod tests {
         assert_req_eq, build_authorization_header, read,
         sign::{calculate_signature, encode_with_hex, generate_signing_key},
         types::{AsSigV4, CanonicalRequest, DateExt, DateTimeExt, Scope, StringToSign},
-        Error, SignableBody, SigningSettings, DATE_FORMAT,
+        Error, SignableBody, SignedBodyHeaderType, SigningSettings, DATE_FORMAT,
     };
     use chrono::{Date, DateTime, NaiveDateTime, Utc};
-    use http::{Method, Request, Uri, Version};
+    use http::{HeaderValue, Method, Request, Uri, Version};
     use pretty_assertions::assert_eq;
     use std::{convert::TryFrom, str::FromStr};
 
@@ -252,12 +231,105 @@ mod tests {
         let mut req = parse_request(s.as_bytes())?;
 
         let headers = req.headers_mut();
-        headers.insert("authorization", authorization.parse()?);
         headers.insert("X-Amz-Date", x_azn_date.parse()?);
+        headers.insert("authorization", authorization.parse()?);
         let expected = read!(sreq: "get-vanilla-query-order-key-case")?;
         let expected = parse_request(expected.as_bytes())?;
         assert_req_eq!(expected, req);
 
+        Ok(())
+    }
+
+    #[test]
+    fn test_set_xamz_sha_256() -> Result<(), Error> {
+        let s = read!(req: "get-vanilla-query-order-key-case")?;
+        let req = parse_request(s.as_bytes())?;
+        let date = NaiveDateTime::parse_from_str("20150830T123600Z", DATE_FORMAT).unwrap();
+        let date = DateTime::<Utc>::from_utc(date, Utc);
+        let mut signing_settings = SigningSettings::default();
+        signing_settings.signed_body_header = SignedBodyHeaderType::XAmzSha256;
+        let (creq, new_headers) = CanonicalRequest::from(
+            &req,
+            SignableBody::Bytes(req.body()),
+            &signing_settings,
+            date,
+            None,
+        )?;
+        assert_eq!(
+            new_headers.x_amz_content_256,
+            Some(HeaderValue::from_static(
+                "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+            ))
+        );
+        // assert that the sha256 header was added
+        assert_eq!(
+            creq.signed_headers.fmt(),
+            "host;x-amz-content-sha256;x-amz-date"
+        );
+
+        signing_settings.signed_body_header = SignedBodyHeaderType::NoHeader;
+        let (creq, new_headers) = CanonicalRequest::from(
+            &req,
+            SignableBody::Bytes(req.body()),
+            &signing_settings,
+            date,
+            None,
+        )?;
+        assert_eq!(new_headers.x_amz_content_256, None);
+        assert_eq!(creq.signed_headers.fmt(), "host;x-amz-date");
+        Ok(())
+    }
+
+    #[test]
+    fn test_unsigned_payload() -> Result<(), Error> {
+        let s = read!(req: "get-vanilla-query-order-key-case")?;
+        let req = parse_request(s.as_bytes())?;
+        let date = NaiveDateTime::parse_from_str("20150830T123600Z", DATE_FORMAT).unwrap();
+        let date = DateTime::<Utc>::from_utc(date, Utc);
+        let mut signing_settings = SigningSettings::default();
+        signing_settings.signed_body_header = SignedBodyHeaderType::XAmzSha256;
+        let (creq, new_headers) = CanonicalRequest::from(
+            &req,
+            SignableBody::UnsignedPayload,
+            &signing_settings,
+            date,
+            None,
+        )?;
+        assert_eq!(
+            new_headers.x_amz_content_256,
+            Some(HeaderValue::from_static("UNSIGNED-PAYLOAD"))
+        );
+        assert_eq!(creq.payload_hash, "UNSIGNED-PAYLOAD");
+        Ok(())
+    }
+
+    #[test]
+    fn test_precomputed_payload() -> Result<(), Error> {
+        let s = read!(req: "get-vanilla-query-order-key-case")?;
+        let req = parse_request(s.as_bytes())?;
+        let date = NaiveDateTime::parse_from_str("20150830T123600Z", DATE_FORMAT).unwrap();
+        let date = DateTime::<Utc>::from_utc(date, Utc);
+        let mut signing_settings = SigningSettings::default();
+        signing_settings.signed_body_header = SignedBodyHeaderType::XAmzSha256;
+        let (creq, new_headers) = CanonicalRequest::from(
+            &req,
+            SignableBody::Precomputed(String::from(
+                "44ce7dd67c959e0d3524ffac1771dfbba87d2b6b4b4e99e42034a8b803f8b072",
+            )),
+            &signing_settings,
+            date,
+            None,
+        )?;
+        assert_eq!(
+            new_headers.x_amz_content_256,
+            Some(HeaderValue::from_static(
+                "44ce7dd67c959e0d3524ffac1771dfbba87d2b6b4b4e99e42034a8b803f8b072"
+            ))
+        );
+        assert_eq!(
+            creq.payload_hash,
+            "44ce7dd67c959e0d3524ffac1771dfbba87d2b6b4b4e99e42034a8b803f8b072"
+        );
         Ok(())
     }
 

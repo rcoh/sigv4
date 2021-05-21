@@ -3,7 +3,10 @@ use crate::{
     SigningSettings, UriEncoding, DATE_FORMAT, HMAC_256,
 };
 use chrono::{format::ParseError, Date, DateTime, NaiveDate, NaiveDateTime, Utc};
-use http::{HeaderMap, Method, Request, header::{HeaderName, USER_AGENT}};
+use http::{
+    header::{HeaderName, USER_AGENT},
+    HeaderMap, Method, Request,
+};
 use serde_urlencoded as qs;
 use std::{
     cmp::Ordering,
@@ -27,9 +30,9 @@ pub(crate) struct CanonicalRequest {
 }
 
 pub(crate) struct AddedHeaders {
-    pub x_amz_date: String,
-    pub x_amz_content_256: Option<String>,
-    pub x_amz_security_token: Option<String>,
+    pub x_amz_date: HeaderValue,
+    pub x_amz_content_256: Option<HeaderValue>,
+    pub x_amz_security_token: Option<HeaderValue>,
 }
 
 impl CanonicalRequest {
@@ -63,19 +66,18 @@ impl CanonicalRequest {
         let x_amz_date = HeaderName::from_static("x-amz-date");
         let date_str = date.fmt_aws();
         let date_header = HeaderValue::from_str(&date_str).expect("date is valid header value");
-        canonical_headers.insert(x_amz_date, date_header);
+        canonical_headers.insert(x_amz_date, date_header.clone());
         let mut out = AddedHeaders {
-            x_amz_date: date_str,
+            x_amz_date: date_header,
             x_amz_content_256: None,
             x_amz_security_token: None,
         };
 
         if let Some(security_token) = security_token {
-            canonical_headers.insert(
-                "x-amz-security-token",
-                HeaderValue::from_str(security_token)?,
-            );
-            out.x_amz_security_token = Some(security_token.to_string());
+            let mut sec_header = HeaderValue::from_str(security_token)?;
+            sec_header.set_sensitive(true);
+            canonical_headers.insert("x-amz-security-token", sec_header.clone());
+            out.x_amz_security_token = Some(sec_header);
         }
 
         let payload_hash = match body {
@@ -87,7 +89,7 @@ impl CanonicalRequest {
         if settings.signed_body_header == SignedBodyHeaderType::XAmzSha256 {
             let as_header_value = HeaderValue::from_str(&creq.payload_hash)?;
             canonical_headers.insert("x-amz-content-sha256", as_header_value.clone());
-            out.x_amz_content_256 = Some(creq.payload_hash.clone());
+            out.x_amz_content_256 = Some(as_header_value);
         }
 
         let mut signed_headers = BTreeSet::new();
