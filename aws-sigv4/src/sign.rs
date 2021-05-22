@@ -12,14 +12,6 @@ pub fn encode(s: String) -> Vec<u8> {
 }
 
 /// HashedPayload = Lowercase(HexEncode(Hash(requestPayload)))
-pub fn encode_with_hex(s: String) -> String {
-    let digest: Digest = digest::digest(&digest::SHA256, s.as_bytes());
-    // no need to lower-case as in step six, as hex::encode
-    // already returns a lower-cased string.
-    hex::encode(digest)
-}
-
-/// HashedPayload = Lowercase(HexEncode(Hash(requestPayload)))
 pub fn encode_bytes_with_hex<B>(bytes: B) -> String
 where
     B: AsRef<[u8]>,
@@ -35,10 +27,6 @@ pub fn calculate_signature(signing_key: Tag, string_to_sign: &[u8]) -> String {
     let tag = hmac::sign(&s_key, string_to_sign);
 
     hex::encode(tag)
-}
-
-pub fn sha256_digest(data: &[u8]) -> String {
-    encode_bytes_with_hex(data)
 }
 
 // kSecret = your secret access key

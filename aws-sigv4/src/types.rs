@@ -1,6 +1,7 @@
 use crate::{
-    header::HeaderValue, sign::encode_bytes_with_hex, Error, SignableBody, SignedBodyHeaderType,
-    SigningSettings, UriEncoding, DATE_FORMAT, HMAC_256,
+    header::HeaderValue, sign::encode_bytes_with_hex, Error, PayloadChecksumKind, SignableBody,
+    SigningSettings, UriEncoding, DATE_FORMAT, HMAC_256, X_AMZ_CONTENT_SHA_256, X_AMZ_DATE,
+    X_AMZ_SECURITY_TOKEN,
 };
 use chrono::{format::ParseError, Date, DateTime, NaiveDate, NaiveDateTime, Utc};
 use http::{
@@ -14,6 +15,8 @@ use std::{
     convert::TryFrom,
     fmt,
 };
+
+const UNSIGNED_PAYLOAD: &str = "UNSIGNED-PAYLOAD";
 
 pub(crate) trait AsSigV4 {
     fn fmt(&self) -> String;
@@ -36,6 +39,21 @@ pub(crate) struct AddedHeaders {
 }
 
 impl CanonicalRequest {
+    /// Construct a CanonicalRequest from an HttpRequest and a signable body
+    ///
+    /// This function returns 2 things:
+    /// 1. The canonical request to use for signing
+    /// 2. `AddedHeaders`, a struct recording the additional headers that were added. These will
+    ///    behavior returned to the top level caller. If the caller wants to create a
+    ///    presigned URL, they can apply these parameters to the query string.
+    ///
+    /// ## Behavior
+    /// There are several settings which alter signing behavior:
+    /// - If a `security_token` is provided as part of the credentials it will be included in the signed headers
+    /// - If `settings.uri_encoding` specifies double encoding, `%` in the URL will be rencoded as
+    /// `%25`
+    /// - If settings.payload_checksum_kind is XAmzSha256, add a x-amz-content-sha256 with the body
+    /// checksum. This is the same checksum used as the "payload_hash" in the canonical request
     pub(crate) fn from<B>(
         req: &Request<B>,
         body: SignableBody,
@@ -43,6 +61,8 @@ impl CanonicalRequest {
         date: DateTime<Utc>,
         security_token: Option<&str>,
     ) -> Result<(CanonicalRequest, AddedHeaders), Error> {
+        // Path encoding: if specified, rencode % as %25
+        // Set method and path into CanonicalRequest
         let path = req.uri().path();
         let path = match settings.uri_encoding {
             // The string is already URI encoded, we don't need to encode everything again, just `%`
@@ -60,13 +80,32 @@ impl CanonicalRequest {
             creq.params = qs::to_string(params)?;
         }
 
+        // Payload hash computation
+        //
+        // Based on the input body, set the payload_hash of the canonical request:
+        // Either:
+        // - compute a hash
+        // - use the precomputed hash
+        // - use `UnsignedPayload`
+        let payload_hash = match body {
+            SignableBody::Bytes(data) => encode_bytes_with_hex(data),
+            SignableBody::Precomputed(digest) => digest,
+            SignableBody::UnsignedPayload => UNSIGNED_PAYLOAD.to_string(),
+        };
+        creq.payload_hash = payload_hash;
+
+        // Header computation:
+        // The canonical request will include headers not present in the input. We need to clone
+        // the headers from the original request and add:
+        // - x-amz-date
+        // - x-amz-security-token (if provided)
+        // - x-amz-content-sha256 (if requested by signing settings)
         let mut canonical_headers = req.headers().clone();
-        canonical_headers.remove("x-amz-date");
-        canonical_headers.remove("x-amz-security-token");
-        let x_amz_date = HeaderName::from_static("x-amz-date");
-        let date_str = date.fmt_aws();
-        let date_header = HeaderValue::from_str(&date_str).expect("date is valid header value");
+        let x_amz_date = HeaderName::from_static(X_AMZ_DATE);
+        let date_header =
+            HeaderValue::try_from(date.fmt_aws()).expect("date is valid header value");
         canonical_headers.insert(x_amz_date, date_header.clone());
+        // to return headers to the user, record which headers we added
         let mut out = AddedHeaders {
             x_amz_date: date_header,
             x_amz_content_256: None,
@@ -76,25 +115,21 @@ impl CanonicalRequest {
         if let Some(security_token) = security_token {
             let mut sec_header = HeaderValue::from_str(security_token)?;
             sec_header.set_sensitive(true);
-            canonical_headers.insert("x-amz-security-token", sec_header.clone());
+            canonical_headers.insert(X_AMZ_SECURITY_TOKEN, sec_header.clone());
             out.x_amz_security_token = Some(sec_header);
         }
 
-        let payload_hash = match body {
-            SignableBody::Bytes(data) => encode_bytes_with_hex(data),
-            SignableBody::Precomputed(digest) => digest.clone(),
-            SignableBody::UnsignedPayload => "UNSIGNED-PAYLOAD".to_string(),
-        };
-        creq.payload_hash = payload_hash.clone();
-        if settings.signed_body_header == SignedBodyHeaderType::XAmzSha256 {
-            let as_header_value = HeaderValue::from_str(&creq.payload_hash)?;
-            canonical_headers.insert("x-amz-content-sha256", as_header_value.clone());
-            out.x_amz_content_256 = Some(as_header_value);
+        if settings.payload_checksum_kind == PayloadChecksumKind::XAmzSha256 {
+            let header = HeaderValue::from_str(&creq.payload_hash)?;
+            canonical_headers.insert(X_AMZ_CONTENT_SHA_256, header.clone());
+            out.x_amz_content_256 = Some(header);
         }
 
+        #[allow(clippy::mutable_key_type)]
         let mut signed_headers = BTreeSet::new();
         for (name, _) in canonical_headers.iter() {
-            // The user agent header should not be signed
+            // The user agent header should not be signed because it may
+            // be alterted by proxies
             if name != USER_AGENT {
                 signed_headers.insert(CanonicalHeaderName(name.clone()));
             }

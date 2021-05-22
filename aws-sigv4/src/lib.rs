@@ -19,7 +19,7 @@ pub mod types;
 type Error = Box<dyn std::error::Error + Send + Sync + 'static>;
 
 use crate::UriEncoding::Double;
-use sign::{calculate_signature, encode_with_hex, generate_signing_key};
+use sign::{calculate_signature, encode_bytes_with_hex, generate_signing_key};
 use std::time::SystemTime;
 use types::{AsSigV4, CanonicalRequest, StringToSign};
 
@@ -74,13 +74,21 @@ pub struct SigningSettings {
     /// _double-encode_ the URI in creating the canonical request in order to pass a signature check.
     pub uri_encoding: UriEncoding,
 
-    pub signed_body_header: SignedBodyHeaderType,
+    /// Add an additional checksum header
+    pub payload_checksum_kind: PayloadChecksumKind,
 }
 
 #[non_exhaustive]
 #[derive(Debug, Eq, PartialEq)]
-pub enum SignedBodyHeaderType {
+pub enum PayloadChecksumKind {
+    /// Add x-amz-checksum-sha256 to the canonical request
+    ///
+    /// This setting is required for S3
     XAmzSha256,
+
+    /// Do not add an additional header when creating the canonical request
+    ///
+    /// This is "normal mode" and will work for services other than S3
     NoHeader,
 }
 
@@ -98,17 +106,30 @@ impl Default for SigningSettings {
     fn default() -> Self {
         Self {
             uri_encoding: Double,
-            signed_body_header: SignedBodyHeaderType::NoHeader,
+            payload_checksum_kind: PayloadChecksumKind::NoHeader,
         }
     }
 }
 
 pub enum SignableBody<'a> {
+    /// A body composed of a slice of bytes
     Bytes(&'a [u8]),
+    /// An unsigned payload
+    ///
+    /// UnsignedPayload is used for streaming requests where the contents of the body cannot be
+    /// known prior to signing
     UnsignedPayload,
+
+    /// A precomputed body checksum. The checksum should be a SHA256 checksum of the body,
+    /// lowercase hex encoded. Eg:
+    /// `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`
     Precomputed(String),
 }
 
+/// req must NOT contain any of the following headers:
+/// - x-amz-date
+/// - x-amz-content-sha-256
+/// - x-amz-security-token
 pub fn sign_core<'a, B>(
     req: &'a http::Request<B>,
     body: SignableBody,
@@ -128,7 +149,7 @@ pub fn sign_core<'a, B>(
     let (creq, extra_headers) = CanonicalRequest::from(req, body, settings, date, *security_token)?;
 
     // Step 2: https://docs.aws.amazon.com/en_pv/general/latest/gr/sigv4-create-string-to-sign.html.
-    let encoded_creq = &encode_with_hex(creq.fmt());
+    let encoded_creq = &encode_bytes_with_hex(creq.fmt().as_bytes());
     let sts = StringToSign::new(date, region, svc, encoded_creq);
 
     // Step 3: https://docs.aws.amazon.com/en_pv/general/latest/gr/sigv4-calculate-signature.html
@@ -140,6 +161,8 @@ pub fn sign_core<'a, B>(
         build_authorization_header(access_key, &creq, sts, &signature).parse()?;
     authorization.set_sensitive(true);
 
+    // Construct an iterator of headers that the caller can attach to their request
+    // either as headers or as query parameters to create a presigned URL
     let date = (X_AMZ_DATE, extra_headers.x_amz_date);
     let mut security_token = extra_headers
         .x_amz_security_token
@@ -147,11 +170,11 @@ pub fn sign_core<'a, B>(
     let mut content = extra_headers
         .x_amz_content_256
         .map(|content| (X_AMZ_CONTENT_SHA_256, content));
-    Ok(iter::once(("authorization", authorization))
-        .chain(iter::once(date))
-        .chain(iter::from_fn(move || {
-            security_token.take().or_else(|| content.take())
-        })))
+    let auth = iter::once(("authorization", authorization));
+    let date = iter::once(date);
+    Ok(auth.chain(date).chain(iter::from_fn(move || {
+        security_token.take().or_else(|| content.take())
+    })))
 }
 
 #[derive(Debug, PartialEq, Serialize, Deserialize, Default, Clone)]
@@ -178,9 +201,9 @@ impl<'a> Credentials<'a> {
 mod tests {
     use crate::{
         assert_req_eq, build_authorization_header, read,
-        sign::{calculate_signature, encode_with_hex, generate_signing_key},
+        sign::{calculate_signature, encode_bytes_with_hex, generate_signing_key},
         types::{AsSigV4, CanonicalRequest, DateExt, DateTimeExt, Scope, StringToSign},
-        Error, SignableBody, SignedBodyHeaderType, SigningSettings, DATE_FORMAT,
+        Error, PayloadChecksumKind, SignableBody, SigningSettings, DATE_FORMAT,
     };
     use chrono::{Date, DateTime, NaiveDateTime, Utc};
     use http::{HeaderValue, Method, Request, Uri, Version};
@@ -213,7 +236,7 @@ mod tests {
         assert_eq!(actual, expected);
 
         // Step 2: https://docs.aws.amazon.com/en_pv/general/latest/gr/sigv4-create-string-to-sign.html.
-        let encoded_creq = &encode_with_hex(creq.fmt());
+        let encoded_creq = &encode_bytes_with_hex(creq.fmt().as_bytes());
         let sts = StringToSign::new(date, "us-east-1", "service", encoded_creq);
 
         // Step 3: https://docs.aws.amazon.com/en_pv/general/latest/gr/sigv4-calculate-signature.html
@@ -247,7 +270,7 @@ mod tests {
         let date = NaiveDateTime::parse_from_str("20150830T123600Z", DATE_FORMAT).unwrap();
         let date = DateTime::<Utc>::from_utc(date, Utc);
         let mut signing_settings = SigningSettings::default();
-        signing_settings.signed_body_header = SignedBodyHeaderType::XAmzSha256;
+        signing_settings.payload_checksum_kind = PayloadChecksumKind::XAmzSha256;
         let (creq, new_headers) = CanonicalRequest::from(
             &req,
             SignableBody::Bytes(req.body()),
@@ -267,7 +290,7 @@ mod tests {
             "host;x-amz-content-sha256;x-amz-date"
         );
 
-        signing_settings.signed_body_header = SignedBodyHeaderType::NoHeader;
+        signing_settings.payload_checksum_kind = PayloadChecksumKind::NoHeader;
         let (creq, new_headers) = CanonicalRequest::from(
             &req,
             SignableBody::Bytes(req.body()),
@@ -287,7 +310,7 @@ mod tests {
         let date = NaiveDateTime::parse_from_str("20150830T123600Z", DATE_FORMAT).unwrap();
         let date = DateTime::<Utc>::from_utc(date, Utc);
         let mut signing_settings = SigningSettings::default();
-        signing_settings.signed_body_header = SignedBodyHeaderType::XAmzSha256;
+        signing_settings.payload_checksum_kind = PayloadChecksumKind::XAmzSha256;
         let (creq, new_headers) = CanonicalRequest::from(
             &req,
             SignableBody::UnsignedPayload,
@@ -310,7 +333,7 @@ mod tests {
         let date = NaiveDateTime::parse_from_str("20150830T123600Z", DATE_FORMAT).unwrap();
         let date = DateTime::<Utc>::from_utc(date, Utc);
         let mut signing_settings = SigningSettings::default();
-        signing_settings.signed_body_header = SignedBodyHeaderType::XAmzSha256;
+        signing_settings.payload_checksum_kind = PayloadChecksumKind::XAmzSha256;
         let (creq, new_headers) = CanonicalRequest::from(
             &req,
             SignableBody::Precomputed(String::from(
@@ -348,7 +371,7 @@ mod tests {
         )?
         .0;
 
-        let encoded_creq = &encode_with_hex(creq.fmt());
+        let encoded_creq = &encode_bytes_with_hex(creq.fmt().as_bytes());
         let sts = StringToSign::new(date, "us-east-1", "service", encoded_creq);
 
         let secret = "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY";
@@ -414,7 +437,7 @@ mod tests {
     #[test]
     fn sign_payload_empty_string() {
         let expected = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
-        let actual = encode_with_hex(String::new());
+        let actual = encode_bytes_with_hex(&[]);
         assert_eq!(expected, actual);
     }
 
@@ -441,7 +464,7 @@ mod tests {
         let date = DateTime::parse_aws("20150830T123600Z")?;
         let creq = read!(creq: "get-vanilla-query-order-key-case")?;
         let expected_sts = read!(sts: "get-vanilla-query-order-key-case")?;
-        let encoded = encode_with_hex(creq);
+        let encoded = encode_bytes_with_hex(creq.as_bytes());
 
         let actual = StringToSign::new(date, "us-east-1", "service", &encoded);
         assert_eq!(expected_sts, actual.fmt());
@@ -481,7 +504,7 @@ mod tests {
     #[test]
     fn test_digest_of_canonical_request() -> Result<(), Error> {
         let creq = read!(creq: "get-vanilla-query-order-key-case")?;
-        let actual = encode_with_hex(creq);
+        let actual = encode_bytes_with_hex(creq.as_bytes());
         let expected = "816cd5b414d056048ba4f7c5386d6e0533120fb1fcfa93762cf0fc39e2cf19e0";
 
         assert_eq!(expected, actual);
