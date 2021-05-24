@@ -111,6 +111,8 @@ impl Default for SigningSettings {
     }
 }
 
+#[derive(Debug, Clone, Eq, PartialEq)]
+#[non_exhaustive]
 pub enum SignableBody<'a> {
     /// A body composed of a slice of bytes
     Bytes(&'a [u8]),
@@ -126,7 +128,7 @@ pub enum SignableBody<'a> {
     Precomputed(String),
 }
 
-/// req must NOT contain any of the following headers:
+/// req MUST NOT contain any of the following headers:
 /// - x-amz-date
 /// - x-amz-content-sha-256
 /// - x-amz-security-token
