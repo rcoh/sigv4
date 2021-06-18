@@ -535,7 +535,7 @@ mod tests {
 
     #[test]
     fn test_tilde_in_uri() -> Result<(), Error> {
-        let req = http::Request::builder().uri("https://s3.us-east-1.amazonaws.com/my-bucket?list-type=2&prefix=~objprefix&single&k=").body("").unwrap();
+        let req = http::Request::builder().uri("https://s3.us-east-1.amazonaws.com/my-bucket?list-type=2&prefix=~objprefix&single&k=&unreserved=-_.~").body("").unwrap();
         let date = DateTime::parse_aws("20210511T154045Z")?;
         let creq = CanonicalRequest::from(
             &req, SignableBody::Bytes(req.body().as_ref()),
@@ -543,7 +543,7 @@ mod tests {
             date,
             None
         )?.0;
-        assert_eq!(creq.params, "k=&list-type=2&prefix=~objprefix&single=");
+        assert_eq!(creq.params, "k=&list-type=2&prefix=~objprefix&single=&unreserved=-_.~");
         Ok(())
     }
 
