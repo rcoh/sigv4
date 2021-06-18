@@ -517,7 +517,6 @@ mod tests {
     fn test_double_url_encode() -> Result<(), Error> {
         let s = read!(req: "double-url-encode")?;
         let req = parse_request(s.as_bytes())?;
-        println!("{:?}", req);
         let date = DateTime::parse_aws("20210511T154045Z")?;
         let creq = CanonicalRequest::from(
             &req,
@@ -531,6 +530,20 @@ mod tests {
         let actual = format!("{}", creq);
         let expected = read!(creq: "double-url-encode")?;
         assert_eq!(actual, expected);
+        Ok(())
+    }
+
+    #[test]
+    fn test_tilde_in_uri() -> Result<(), Error> {
+        let req = http::Request::builder().uri("https://s3.us-east-1.amazonaws.com/my-bucket?list-type=2&prefix=~objprefix").body("").unwrap();
+        let date = DateTime::parse_aws("20210511T154045Z")?;
+        let creq = CanonicalRequest::from(
+            &req, SignableBody::Bytes(req.body().as_ref()),
+            &SigningSettings::default(),
+            date,
+            None
+        )?.0;
+        assert_eq!(creq.params, "list-type=2&prefix=~objprefix");
         Ok(())
     }
 

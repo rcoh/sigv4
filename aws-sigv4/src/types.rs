@@ -77,7 +77,20 @@ impl CanonicalRequest {
 
         if let Some(path) = req.uri().query() {
             let params: BTreeMap<String, String> = qs::from_str(path)?;
-            creq.params = qs::to_string(params)?;
+            let n = params.len();
+            let mut out = String::new();
+            for (i, (k, v)) in params.into_iter().enumerate() {
+                let last = i == n - 1;
+                out.push_str(&percent_encoding::percent_encode(&k.as_bytes(), BASE_SET).to_string());
+                if v != "" {
+                    out.push('=');
+                    out.push_str(&percent_encoding::percent_encode(&v.as_bytes(), BASE_SET).to_string());
+                }
+                if !last {
+                    out.push('&');
+                }
+            }
+            creq.params = out;
         }
 
         // Payload hash computation
@@ -141,6 +154,35 @@ impl CanonicalRequest {
         Ok((creq, out))
     }
 }
+
+use percent_encoding::{AsciiSet, CONTROLS};
+
+/// base set of characters that must be URL encoded
+pub const BASE_SET: &AsciiSet = &CONTROLS
+    .add(b' ')
+    .add(b'/')
+    // RFC-3986 §3.3 allows sub-delims (defined in section2.2) to be in the path component.
+    // This includes both colon ':' and comma ',' characters.
+    // Smithy protocol tests & AWS services percent encode these expected values. Signing
+    // will fail if these values are not percent encoded
+    .add(b':')
+    .add(b',')
+    .add(b'?')
+    .add(b'#')
+    .add(b'[')
+    .add(b']')
+    .add(b'@')
+    .add(b'!')
+    .add(b'$')
+    .add(b'&')
+    .add(b'\'')
+    .add(b'(')
+    .add(b')')
+    .add(b'*')
+    .add(b'+')
+    .add(b';')
+    .add(b'=')
+    .add(b'%');
 
 impl AsSigV4 for CanonicalRequest {
     fn fmt(&self) -> String {
