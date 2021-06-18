@@ -82,10 +82,8 @@ impl CanonicalRequest {
             for (i, (k, v)) in params.into_iter().enumerate() {
                 let last = i == n - 1;
                 out.push_str(&percent_encoding::percent_encode(&k.as_bytes(), BASE_SET).to_string());
-                if v != "" {
-                    out.push('=');
-                    out.push_str(&percent_encoding::percent_encode(&v.as_bytes(), BASE_SET).to_string());
-                }
+                out.push('=');
+                out.push_str(&percent_encoding::percent_encode(&v.as_bytes(), BASE_SET).to_string());
                 if !last {
                     out.push('&');
                 }
